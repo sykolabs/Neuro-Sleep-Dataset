@@ -1,0 +1,415 @@
+"""
+MIT-BIH PSG -> Feature Dataset Builder
+
+Objetivo:
+Convertir registros MIT-BIH PSG (WFDB: .hea + .dat + anotaciones)
+a un dataset final por epochs de 30 segundos con features de EEG,
+compatible con NeuroSleep Analytics.
+
+Salida:
+1. CSV individual por sujeto
+2. CSV unificado final:
+   sleep_features_b.csv
+"""
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import wfdb
+from scipy.stats import skew, kurtosis
+from scipy.signal import welch
+
+
+# =========================================================
+# CONFIGURACIÓN
+# =========================================================
+
+FOLDERS = [
+    r"C:\Users\orlyj\OneDrive\Documents\Pro1Dataset\Pro1Dataset\MIT-BIH PSG\MIT-BIH PSG Dataset 1-7",
+    r"C:\Users\orlyj\OneDrive\Documents\Pro1Dataset\Pro1Dataset\MIT-BIH PSG\MIT-BIH PSG Dataset 8-16",
+]
+
+OUTPUT_DIR = r"./output"
+EPOCH_SEC = 30
+
+# canales EEG preferidos
+PREFERRED_EEG_CHANNELS = [
+    "EEG (C4-A1)",
+    "EEG C4-A1",
+    "C4-A1",
+    "EEG",
+    "EEG(sec)",
+    "EEG2",
+]
+
+# mapa de nombres
+STAGE_NAME_MAP = {
+    "W": "Wake",
+    "1": "N1",
+    "2": "N2",
+    "3": "N3",
+    "4": "N3",
+    "R": "REM",
+}
+
+# mapa numérico final compatible con tu proyecto
+STAGE_NUM_MAP = {
+    "W": 0,
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "4": 3,
+    "R": 4,
+}
+
+VALID_STAGE_CODES = set(STAGE_NUM_MAP.keys())
+
+
+# =========================================================
+# UTILIDADES
+# =========================================================
+
+def find_records(folders):
+    records = []
+    for folder in folders:
+        p = Path(folder)
+        if not p.exists():
+            print(f"[!] Carpeta no encontrada: {folder}")
+            continue
+
+        for hea in sorted(p.glob("*.hea")):
+            record_name = hea.stem
+            dat_file = hea.with_suffix(".dat")
+            if dat_file.exists():
+                records.append((p, record_name))
+    return records
+
+
+def read_sleep_annotations(record_path, record_name):
+    """
+    Lee anotaciones de sueño desde .st
+    y extrae la etapa desde aux_note.
+    Ejemplos:
+      '4 LA LA' -> stage_code = '4'
+      '3 HA'    -> stage_code = '3'
+      '2 LA'    -> stage_code = '2'
+      'W ...'   -> stage_code = 'W'
+      'R ...'   -> stage_code = 'R'
+    """
+    ann = None
+    used_ext = None
+
+    for ext in ["st", "slp", "hypnogram", "atr"]:
+        try:
+            ann = wfdb.rdann(str(record_path / record_name), ext)
+            used_ext = ext
+            break
+        except Exception:
+            continue
+
+    if ann is None:
+        return None, None
+
+    samples = ann.sample
+    aux_notes = ann.aux_note if hasattr(ann, "aux_note") else []
+
+    rows = []
+
+    for i in range(len(samples)):
+        sample = samples[i]
+        aux = aux_notes[i] if i < len(aux_notes) else ""
+
+        if not isinstance(aux, str):
+            continue
+
+        aux = aux.strip()
+        if not aux:
+            continue
+
+        # La etapa está en el primer carácter útil
+        first_char = aux[0].upper()
+
+        if first_char in VALID_STAGE_CODES:
+            stage_code = first_char
+            rows.append({
+                "annotation_sample": sample,
+                "stage_code": stage_code,
+                "stage_name": STAGE_NAME_MAP[stage_code],
+                "sleep_stage": STAGE_NUM_MAP[stage_code]
+            })
+
+    if not rows:
+        return None, used_ext
+
+    df = pd.DataFrame(rows)
+    return df, used_ext
+
+
+def select_eeg_channel(sig_names):
+    """
+    Busca el mejor canal EEG disponible.
+    """
+    # intento exacto por nombres preferidos
+    for preferred in PREFERRED_EEG_CHANNELS:
+        for i, ch in enumerate(sig_names):
+            if ch.strip().lower() == preferred.strip().lower():
+                return i, ch
+
+    # intento flexible
+    for i, ch in enumerate(sig_names):
+        ch_low = ch.lower()
+        if "eeg" in ch_low:
+            return i, ch
+
+    return None, None
+
+
+def safe_log(x, eps=1e-8):
+    return np.log10(max(x, eps))
+
+
+def bandpower(freqs, psd, fmin, fmax):
+    mask = (freqs >= fmin) & (freqs < fmax)
+    if not np.any(mask):
+        return 0.0
+    return np.trapezoid(psd[mask], freqs[mask])
+
+
+def spectral_entropy_from_psd(psd):
+    psd = np.asarray(psd, dtype=float)
+    psd = np.clip(psd, 1e-12, None)
+    psd_norm = psd / np.sum(psd)
+    return -np.sum(psd_norm * np.log2(psd_norm))
+
+
+def hjorth_parameters(signal):
+    signal = np.asarray(signal, dtype=float)
+
+    if len(signal) < 3:
+        return 0.0, 0.0, 0.0
+
+    first_deriv = np.diff(signal)
+    second_deriv = np.diff(first_deriv)
+
+    var_zero = np.var(signal)
+    var_d1 = np.var(first_deriv)
+    var_d2 = np.var(second_deriv)
+
+    activity = var_zero
+
+    mobility = np.sqrt(var_d1 / var_zero) if var_zero > 1e-12 else 0.0
+    complexity = (
+        np.sqrt(var_d2 / var_d1) / mobility
+        if var_d1 > 1e-12 and mobility > 1e-12
+        else 0.0
+    )
+
+    return activity, mobility, complexity
+
+
+def compute_epoch_features(epoch_signal, fs):
+    """
+    Extrae features similares a tu sleep_features.csv
+    """
+    x = np.asarray(epoch_signal, dtype=float)
+
+    if len(x) < 10:
+        return None
+
+    # quitar NaN e inf
+    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # estadísticas básicas
+    feat_skewness = float(skew(x))
+    feat_kurtosis = float(kurtosis(x))
+    feat_peak = float(np.max(np.abs(x)))
+
+    # Welch PSD
+    nperseg = min(256, len(x))
+    if nperseg < 16:
+        return None
+
+    freqs, psd = welch(x, fs=fs, nperseg=nperseg)
+
+    # bandas típicas
+    delta = bandpower(freqs, psd, 0.5, 4.0)
+    theta = bandpower(freqs, psd, 4.0, 8.0)
+    alpha = bandpower(freqs, psd, 8.0, 13.0)
+    beta = bandpower(freqs, psd, 13.0, 30.0)
+
+    total_power = delta + theta + alpha + beta + 1e-8
+
+    delta_ratio = delta / total_power
+    theta_ratio = theta / total_power
+    alpha_ratio = alpha / total_power
+    beta_ratio = beta / total_power
+
+    theta_alpha_ratio = theta / (alpha + 1e-8)
+    delta_beta_ratio = delta / (beta + 1e-8)
+
+    # pico espectral
+    fft_peak_freq = float(freqs[np.argmax(psd)]) if len(freqs) > 0 else 0.0
+
+    # entropía espectral
+    spectral_entropy = float(spectral_entropy_from_psd(psd))
+
+    # Hjorth
+    hjorth_activity, hjorth_mobility, hjorth_complexity = hjorth_parameters(x)
+
+    return {
+        "skewness": feat_skewness,
+        "kurtosis": feat_kurtosis,
+        "peak": feat_peak,
+        "log_delta": safe_log(delta),
+        "log_theta": safe_log(theta),
+        "log_alpha": safe_log(alpha),
+        "log_beta": safe_log(beta),
+        "delta_ratio": float(delta_ratio),
+        "theta_ratio": float(theta_ratio),
+        "alpha_ratio": float(alpha_ratio),
+        "beta_ratio": float(beta_ratio),
+        "theta_alpha_ratio": float(theta_alpha_ratio),
+        "delta_beta_ratio": float(delta_beta_ratio),
+        "fft_peak_freq": fft_peak_freq,
+        "spectral_entropy": spectral_entropy,
+        "hjorth_activity": float(hjorth_activity),
+        "hjorth_mobility": float(hjorth_mobility),
+        "hjorth_complexity": float(hjorth_complexity),
+    }
+
+
+def build_subject_feature_rows(record_path, record_name):
+    """
+    Construye filas por epoch para un sujeto.
+    """
+    record_full_path = str(record_path / record_name)
+
+    record = wfdb.rdrecord(record_full_path)
+    fs = float(record.fs)
+    sig_names = record.sig_name
+
+    eeg_idx, eeg_name = select_eeg_channel(sig_names)
+    if eeg_idx is None:
+        print(f"  [!] {record_name}: no se encontró canal EEG compatible")
+        return None
+
+    ann_df, ann_ext = read_sleep_annotations(record_path, record_name)
+    if ann_df is None or ann_df.empty:
+        print(f"  [!] {record_name}: sin anotaciones válidas de sueño")
+        return None
+
+    eeg_signal = record.p_signal[:, eeg_idx]
+    epoch_samples = int(fs * EPOCH_SEC)
+
+    rows = []
+
+    for epoch_idx, row in enumerate(ann_df.itertuples(index=False), start=0):
+        start = int(row.annotation_sample)
+        end = start + epoch_samples
+
+        if end > len(eeg_signal):
+            continue
+
+        stage_code = row.stage_code
+        if stage_code not in VALID_STAGE_CODES:
+            continue
+
+        epoch_signal = eeg_signal[start:end]
+        features = compute_epoch_features(epoch_signal, fs)
+
+        if features is None:
+            continue
+
+        rows.append({
+            "subject_id": record_name,
+            "epoch": epoch_idx,
+            "sleep_stage": int(STAGE_NUM_MAP[stage_code]),
+            "stage_name": STAGE_NAME_MAP[stage_code],
+            **features
+        })
+
+    if not rows:
+        print(f"  [!] {record_name}: no se pudieron construir epochs válidos")
+        return None
+
+    df_features = pd.DataFrame(rows)
+
+    print(f"  [✓] {record_name}: EEG={eeg_name} | epochs válidos={len(df_features)} | ann=.{ann_ext}")
+    return df_features
+
+
+# =========================================================
+# MAIN
+# =========================================================
+
+def main():
+    print("=" * 60)
+    print("MIT-BIH PSG -> Feature Dataset Builder")
+    print("DV Projects | Daniel Vega")
+    print("=" * 60)
+
+    out_dir = Path(OUTPUT_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    records = find_records(FOLDERS)
+    if not records:
+        print("\n[ERROR] No se encontraron registros WFDB.")
+        print("Verifica las rutas configuradas.")
+        sys.exit(1)
+
+    print(f"\nRegistros encontrados: {len(records)}")
+    for folder, name in records:
+        print(f" - {name}  [{folder.name}]")
+
+    all_subjects = []
+    processed = 0
+    skipped = 0
+
+    for folder, record_name in records:
+        print(f"\n[→] Procesando sujeto: {record_name}")
+
+        try:
+            df_subject = build_subject_feature_rows(folder, record_name)
+
+            if df_subject is None or df_subject.empty:
+                skipped += 1
+                continue
+
+            subject_csv = out_dir / f"{record_name}_features.csv"
+            df_subject.to_csv(subject_csv, index=False, encoding="utf-8")
+            print(f"  [✓] Guardado CSV individual: {subject_csv.name}")
+
+            all_subjects.append(df_subject)
+            processed += 1
+
+        except Exception as e:
+            print(f"  [ERROR] {record_name}: {e}")
+            skipped += 1
+
+    if not all_subjects:
+        print("\n[ERROR] No se generó ningún dataset de features.")
+        sys.exit(1)
+
+    final_df = pd.concat(all_subjects, ignore_index=True)
+
+    final_csv = out_dir / "sleep_features_b.csv"
+    final_df.to_csv(final_csv, index=False, encoding="utf-8")
+
+    print("\n" + "=" * 60)
+    print("RESUMEN FINAL")
+    print("=" * 60)
+    print(f"Sujetos procesados correctamente : {processed}")
+    print(f"Sujetos omitidos / fallidos     : {skipped}")
+    print(f"Total de filas finales          : {len(final_df)}")
+    print(f"Total de columnas               : {len(final_df.columns)}")
+    print(f"Archivo final generado          : {final_csv}")
+    print("=" * 60)
+
+    print("\nColumnas finales:")
+    print(", ".join(final_df.columns))
+
+
+if __name__ == "__main__":
+    main()
