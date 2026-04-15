@@ -1,6 +1,6 @@
 # 🧠 NeuroSleep Data Processing Pipeline
 
-This project was developed to **convert raw polysomnography (PSG) sleep data into labeled, machine learning-ready datasets** using a single EEG channel.
+This project was developed to convert raw polysomnography (PSG) sleep data into labeled, machine learning-ready datasets using a single EEG channel.
 
 The main objective is to standardize multiple public sleep datasets into a unified format for:
 
@@ -15,7 +15,7 @@ The main objective is to standardize multiple public sleep datasets into a unifi
 
 Each script in this repository was created to solve the same problem across different datasets:
 
-👉 **Raw sleep data is complex and not directly usable for Machine Learning.**
+👉 Raw sleep data is complex and not directly usable for Machine Learning.
 
 Therefore, each dataset required a custom pipeline to:
 
@@ -33,7 +33,7 @@ Therefore, each dataset required a custom pipeline to:
 
 ### 📌 Purpose
 
-This script was created to process Sleep-EDF data, which contains EEG recordings and hypnogram annotations, and convert them into labeled feature datasets.
+Processes EEG recordings and hypnogram annotations into labeled datasets.
 
 ### ⚙️ What it does
 
@@ -45,7 +45,7 @@ This script was created to process Sleep-EDF data, which contains EEG recordings
 
 ### 📤 Output
 
-* `sleep_features.csv`
+`sleep_features.csv`
 
 ---
 
@@ -53,18 +53,18 @@ This script was created to process Sleep-EDF data, which contains EEG recordings
 
 ### 📌 Purpose
 
-This script was designed to handle WFDB-format data (`.hea + .dat + annotations`) and convert annotation-based sleep stages into structured labels.
+Handles WFDB-format sleep data and converts annotation-based sleep stages into structured labels.
 
 ### ⚙️ What it does
 
-* Reads raw EEG signals using WFDB
-* Extracts sleep stages from annotation files (`.st`, `.slp`, etc.)
-* Processes epochs of 30 seconds
+* Reads EEG signals using WFDB
+* Extracts stages from `.st`, `.slp`, `.atr`, etc.
+* Processes 30-second epochs
 * Computes statistical and spectral features
 
 ### 📤 Output
 
-* `sleep_features_b.csv`
+`sleep_features_b.csv`
 
 ---
 
@@ -72,23 +72,21 @@ This script was designed to handle WFDB-format data (`.hea + .dat + annotations`
 
 ### 📌 Purpose
 
-This script was developed to process clinical sleep data that includes both sleep stages and respiratory events (apnea).
+Processes clinical sleep data including respiratory events (apnea).
 
 ### ⚙️ What it does
 
-* Converts `.rec` files into readable EEG format
-* Extracts sleep stages from `_stage` files
-* Detects apnea events from `_respevt` files
-* Generates features per epoch
-* Adds apnea classification (binary)
+* Converts `.rec` → EEG-readable format
+* Extracts stages from `_stage` files
+* Detects apnea from `_respevt` files
+* Generates epoch-based features
+* Adds apnea classification
 
 ### 📤 Output
 
-* `st_vincent_sleep_features.csv`
+`st_vincent_sleep_features.csv`
 
 ### 🔥 Extra Feature
-
-Includes:
 
 * `apnea_label` → 0 (no apnea), 1 (apnea present)
 
@@ -98,25 +96,25 @@ Includes:
 
 ### 📌 Purpose
 
-This script was created to process ISRUC dataset recordings using a single EEG channel and scorer annotations.
+Processes ISRUC EEG recordings using a single channel and scorer annotations.
 
 ### ⚙️ What it does
 
 * Reads `.rec` EEG files
-* Uses only primary scorer annotations (`1_1.txt`)
-* Segments into epochs
+* Uses scorer 1 annotations (`1_1.txt`)
+* Segments into 30-second epochs
 * Extracts EEG features
 * Maps sleep stages into standardized labels
 
 ### 📤 Output
 
-* `isruc_sleep_features.csv`
+`isruc_sleep_features.csv`
 
 ---
 
 # 🧠 Feature Extraction
 
-All datasets are processed using the same feature extraction pipeline:
+All datasets share the same feature extraction pipeline:
 
 ### 📈 Time-domain features
 
@@ -151,7 +149,7 @@ All datasets are processed using the same feature extraction pipeline:
 
 # 🏷️ Label Standardization
 
-All datasets are unified into the same labeling system:
+All datasets are unified into:
 
 | Label | Stage |
 | ----- | ----- |
@@ -161,7 +159,7 @@ All datasets are unified into the same labeling system:
 | 3     | N3    |
 | 4     | REM   |
 
-👉 Note: Stage 4 is merged into N3 (modern sleep scoring standard)
+👉 Stage 4 is merged into N3 (modern AASM standard)
 
 ---
 
@@ -175,31 +173,54 @@ project/
 ├── build_st_vincent_features.py    # ST Vincent + apnea processor
 ├── build_isruc_features.py         # ISRUC processor
 │
-├── output/
-│   ├── sleep_features.csv
-│   ├── sleep_features_b.csv
-│   ├── st_vincent_sleep_features.csv
-│   └── isruc_sleep_features.csv
+├── data_sleep_edf/                 # Sleep-EDF dataset
+├── data_mitbih/                   # MIT-BIH dataset
+├── data_st_vincent/               # ST Vincent dataset
+├── data_isruc/                    # ISRUC dataset
 │
-├── app.py                          # Streamlit app
-├── requirements.txt                # Dependencies
+├── output/                        # Sleep-EDF + MIT outputs
+├── output_st_vincent/             # ST Vincent outputs
+├── output_isruc/                  # ISRUC outputs
+│
+├── app.py                         # Streamlit app
+├── requirements.txt
 └── README.md
 ```
 
 ---
 
-# ⚙️ Installation
+# 📂 Data Setup
 
-Install dependencies:
+Each dataset must be placed in its corresponding folder:
 
-```bash
-pip install -r requirements.txt
+**Sleep-EDF**
+
+```
+data_sleep_edf/
+→ .edf PSG + Hypnogram files
 ```
 
-Or manually:
+**MIT-BIH PSG**
 
-```bash
-pip install mne numpy pandas scipy wfdb
+```
+data_mitbih/
+→ .hea + .dat + annotation files
+```
+
+**ST Vincent (UCDDB)**
+
+```
+data_st_vincent/
+→ .rec + _stage + _respevt files
+```
+
+**ISRUC-SLEEP**
+
+```
+data_isruc/
+→ subject folders containing:
+   - .rec file
+   - 1_1.txt (labels)
 ```
 
 ---
@@ -217,9 +238,17 @@ py -3.12 build_isruc_features.py
 
 ---
 
+# 🚀 Portable Design
+
+All scripts use relative paths, allowing the project to run on any machine without modifying file paths.
+
+Simply place the datasets in the correct folders and execute the scripts.
+
+---
+
 # 📊 Output Format
 
-Each dataset is exported as a CSV file:
+Each dataset is exported as:
 
 ```
 subject_id | epoch | features... | sleep_stage
@@ -229,9 +258,7 @@ subject_id | epoch | features... | sleep_stage
 
 # 🚀 Applications
 
-This project enables:
-
-* Sleep stage classification models
+* Sleep stage classification
 * EEG-based Machine Learning pipelines
 * Apnea detection systems
 * Data preprocessing for AI research
@@ -239,10 +266,12 @@ This project enables:
 ---
 
 # 👨‍💻 Author
-Orlando Figueroa 
+
+Orlando Figueroa
 
 ---
 
 # 📄 License
 
 For academic and research purposes only.
+
