@@ -267,7 +267,7 @@ subject_id | epoch | features... | sleep_stage
 
 # 👨‍💻 Author
 
-Orlando Figueroa
+Sykolabs
 
 ---
 
